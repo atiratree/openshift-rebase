@@ -1,0 +1,212 @@
+From 34a52915e325e9ae1e33cdea0b2acad77b7cccfd Mon Sep 17 00:00:00 2001
+From: Lukasz Szaszkiewicz <lukasz.szaszkiewicz@gmail.com>
+Date: Thu, 4 Mar 2021 09:58:56 +0100
+Subject: [PATCH] UPSTREAM: <carry>: allows for switching KCM to talk to Kube
+ API over localhost
+
+to force KCM to use localhost set the following flag in kubecontrollermanager (oc edit kubecontrollermanager cluster)
+
+unsupportedConfigOverrides:
+  extendedArguments:
+    unsupported-kube-api-over-localhost:
+      - "true"
+
+OpenShift-Rebase-Source: 036b11c9895
+
+UPSTREAM: <carry>:  allows for switching KCM to talk to Kube API over localhost
+---
+ .../app/config/patch.go                       |  9 ++++
+ .../app/controllermanager.go                  | 20 +++++++-
+ .../app/options/options.go                    |  8 +++
+ cmd/kube-controller-manager/app/patch.go      | 51 +++++++++++++++++++
+ 4 files changed, 87 insertions(+), 1 deletion(-)
+
+diff --git a/cmd/kube-controller-manager/app/config/patch.go b/cmd/kube-controller-manager/app/config/patch.go
+index a7112d003d4..38b64663b18 100644
+--- a/cmd/kube-controller-manager/app/config/patch.go
++++ b/cmd/kube-controller-manager/app/config/patch.go
+@@ -1,9 +1,18 @@
+ package config
+ 
++import (
++	"k8s.io/client-go/transport"
++
++	"github.com/openshift/library-go/pkg/monitor/health"
++)
++
+ // OpenShiftContext is additional context that we need to launch the kube-controller-manager for openshift.
+ // Basically, this holds our additional config information.
+ type OpenShiftContext struct {
+ 	OpenShiftConfig                     string
+ 	OpenShiftDefaultProjectNodeSelector string
+ 	KubeDefaultProjectNodeSelector      string
++	UnsupportedKubeAPIOverPreferredHost bool
++	PreferredHostRoundTripperWrapperFn  transport.WrapperFunc
++	PreferredHostHealthMonitor          *health.Prober
+ }
+diff --git a/cmd/kube-controller-manager/app/controllermanager.go b/cmd/kube-controller-manager/app/controllermanager.go
+index f10fa78e730..9d67dc023ea 100644
+--- a/cmd/kube-controller-manager/app/controllermanager.go
++++ b/cmd/kube-controller-manager/app/controllermanager.go
+@@ -81,6 +81,8 @@ import (
+ 	serviceaccountcontroller "k8s.io/kubernetes/pkg/controller/serviceaccount"
+ 	kubefeatures "k8s.io/kubernetes/pkg/features"
+ 	"k8s.io/kubernetes/pkg/serviceaccount"
++
++	libgorestclient "github.com/openshift/library-go/pkg/config/client"
+ )
+ 
+ func init() {
+@@ -143,6 +145,11 @@ controller, and serviceaccounts controller.`,
+ 				return err
+ 			}
+ 			cliflag.PrintFlags(cmd.Flags())
++			
++			if err := SetUpPreferredHostForOpenShift(s); err != nil {
++				fmt.Fprintf(os.Stderr, "%v\n", err)
++				os.Exit(1)
++			}
+ 
+ 			c, err := s.Config(KnownControllers(), ControllersDisabledByDefault(), ControllerAliases())
+ 			if err != nil {
+@@ -214,6 +221,17 @@ func Run(ctx context.Context, c *config.CompletedConfig) error {
+ 		logger.Error(err, "Unable to register configz")
+ 	}
+ 
++	// start the localhost health monitor early so that it can be used by the LE client
++	if c.OpenShiftContext.PreferredHostHealthMonitor != nil {
++		hmCtx, cancel := context.WithCancel(context.Background())
++		defer cancel()
++		go func() {
++			<-stopCh
++			cancel()
++		}()
++		go c.OpenShiftContext.PreferredHostHealthMonitor.Run(hmCtx)
++	}
++
+ 	// Setup any healthz checks we will want to use.
+ 	var checks []healthz.HealthChecker
+ 	var electionChecker *leaderelection.HealthzAdaptor
+@@ -894,7 +912,7 @@ func createClientBuilders(logger klog.Logger, c *config.CompletedConfig) (client
+ 		}
+ 
+ 		clientBuilder = clientbuilder.NewDynamicClientBuilder(
+-			restclient.AnonymousClientConfig(c.Kubeconfig),
++			libgorestclient.AnonymousClientConfigWithWrapTransport(c.Kubeconfig),
+ 			c.Client.CoreV1(),
+ 			metav1.NamespaceSystem)
+ 	} else {
+diff --git a/cmd/kube-controller-manager/app/options/options.go b/cmd/kube-controller-manager/app/options/options.go
+index a90d891751f..2254aa1b560 100644
+--- a/cmd/kube-controller-manager/app/options/options.go
++++ b/cmd/kube-controller-manager/app/ojptions/options.go
+@@ -51,6 +51,8 @@ import (
+ 
+ 	// add the kubernetes feature gates
+ 	_ "k8s.io/kubernetes/pkg/features"
++
++	libgorestclient "github.com/openshift/library-go/pkg/config/client"
+ )
+ 
+ const (
+@@ -289,6 +291,7 @@ func (s *KubeControllerManagerOptions) Flags(allControllers []string, disabledBy
+ 	s.ComponentGlobalsRegistry.AddFlags(fss.FlagSet("generic"))
+ 	fs.StringVar(&s.OpenShiftContext.OpenShiftConfig, "openshift-config", s.OpenShiftContext.OpenShiftConfig, "indicates that this process should be compatible with openshift start master")
+ 	fs.MarkHidden("openshift-config")
++	fs.BoolVar(&s.OpenShiftContext.UnsupportedKubeAPIOverPreferredHost, "unsupported-kube-api-over-localhost", false, "when set makes KCM prefer talking to localhost kube-apiserver (when available) instead of LB")
+ 
+ 	return fss
+ }
+@@ -470,6 +473,11 @@ func (s KubeControllerManagerOptions) Config(allControllers []string, disabledBy
+ 	kubeconfig.QPS = s.Generic.ClientConnection.QPS
+ 	kubeconfig.Burst = int(s.Generic.ClientConnection.Burst)
+ 
++	if s.OpenShiftContext.PreferredHostRoundTripperWrapperFn != nil {
++		libgorestclient.DefaultServerName(kubeconfig)
++		kubeconfig.Wrap(s.OpenShiftContext.PreferredHostRoundTripperWrapperFn)
++	}
++
+ 	client, err := clientset.NewForConfig(restclient.AddUserAgent(kubeconfig, KubeControllerManagerUserAgent))
+ 	if err != nil {
+ 		return nil, err
+diff --git a/cmd/kube-controller-manager/app/patch.go b/cmd/kube-controller-manager/app/patch.go
+index 5d85c022993..9286fa77cc3 100644
+--- a/cmd/kube-controller-manager/app/patch.go
++++ b/cmd/kube-controller-manager/app/patch.go
+@@ -1,18 +1,62 @@
+ package app
+ 
+ import (
++	"fmt"
+ 	"io/ioutil"
+ 	"path"
++	"time"
+ 
+ 	"k8s.io/apimachinery/pkg/util/json"
+ 	kyaml "k8s.io/apimachinery/pkg/util/yaml"
+ 	"k8s.io/client-go/informers"
++	"k8s.io/client-go/rest"
++	"k8s.io/client-go/tools/clientcmd"
++	"k8s.io/component-base/metrics/legacyregistry"
+ 	"k8s.io/kubernetes/cmd/kube-controller-manager/app/config"
+ 	"k8s.io/kubernetes/cmd/kube-controller-manager/app/options"
++
++	libgorestclient "github.com/openshift/library-go/pkg/config/client"
++	"github.com/openshift/library-go/pkg/monitor/health"
+ )
+ 
+ var InformerFactoryOverride informers.SharedInformerFactory
+ 
++func SetUpPreferredHostForOpenShift(controllerManagerOptions *options.KubeControllerManagerOptions) error {
++	if !controllerManagerOptions.OpenShiftContext.UnsupportedKubeAPIOverPreferredHost {
++		return nil
++	}
++
++	config, err := clientcmd.BuildConfigFromFlags(controllerManagerOptions.Master, controllerManagerOptions.Generic.ClientConnection.Kubeconfig)
++	if err != nil {
++		return err
++	}
++	libgorestclient.DefaultServerName(config)
++
++	targetProvider := health.StaticTargetProvider{"localhost:6443"}
++	controllerManagerOptions.OpenShiftContext.PreferredHostHealthMonitor, err = health.New(targetProvider, createRestConfigForHealthMonitor(config))
++	if err != nil {
++		return err
++	}
++	controllerManagerOptions.OpenShiftContext.PreferredHostHealthMonitor.
++		WithHealthyProbesThreshold(3).
++		WithUnHealthyProbesThreshold(5).
++		WithProbeInterval(5 * time.Second).
++		WithProbeResponseTimeout(2 * time.Second).
++		WithMetrics(health.Register(legacyregistry.MustRegister))
++
++	controllerManagerOptions.OpenShiftContext.PreferredHostRoundTripperWrapperFn = libgorestclient.NewPreferredHostRoundTripper(func() string {
++		healthyTargets, _ := controllerManagerOptions.OpenShiftContext.PreferredHostHealthMonitor.Targets()
++		if len(healthyTargets) == 1 {
++			return healthyTargets[0]
++		}
++		return ""
++	})
++
++	controllerManagerOptions.Authentication.WithCustomRoundTripper(controllerManagerOptions.OpenShiftContext.PreferredHostRoundTripperWrapperFn)
++	controllerManagerOptions.Authorization.WithCustomRoundTripper(controllerManagerOptions.OpenShiftContext.PreferredHostRoundTripperWrapperFn)
++	return nil
++}
++
+ func ShimForOpenShift(controllerManagerOptions *options.KubeControllerManagerOptions, controllerManager *config.Config) error {
+ 	if len(controllerManager.OpenShiftContext.OpenShiftConfig) == 0 {
+ 		return nil
+@@ -82,3 +126,10 @@ func applyOpenShiftConfigDefaultProjectSelector(controllerManagerOptions *option
+ 
+ 	return nil
+ }
++
++func createRestConfigForHealthMonitor(restConfig *rest.Config) *rest.Config {
++	restConfigCopy := *restConfig
++	rest.AddUserAgent(&restConfigCopy, fmt.Sprintf("%s-health-monitor", options.KubeControllerManagerUserAgent))
++
++	return &restConfigCopy
++}
+-- 
+2.46.0
+

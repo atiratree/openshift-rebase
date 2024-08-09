@@ -1,4 +1,4 @@
-From 307638cb48d7a75d31bcde3501d8c9ba707505be Mon Sep 17 00:00:00 2001
+From 00848235b2f3acb119055dcf9ed86ce35581e219 Mon Sep 17 00:00:00 2001
 From: David Eads <deads@redhat.com>
 Date: Thu, 29 Oct 2020 13:55:56 +0100
 Subject: [PATCH] UPSTREAM: <carry>: openshift-kube-apiserver: add
@@ -213,24 +213,24 @@ OpenShift-Rebase-Source: 56b49c9c143
 OpenShift-Rebase-Source: bcf574c65d1
 
 UPSTREAM: <carry>: openshift-kube-apiserver: add kube-apiserver patches
-
-UPSTREAM: <carry>: openshift-kube-apiserver: add kube-apiserver patches
 ---
- cmd/kube-apiserver/app/options/options.go     |  6 ++
- cmd/kube-apiserver/app/server.go              | 33 ++++++++++
- pkg/controlplane/apiserver/config.go          | 15 +++++
- pkg/kubeapiserver/authorizer/config.go        |  4 ++
- pkg/kubeapiserver/authorizer/modes/patch.go   |  8 +++
- pkg/kubeapiserver/authorizer/patch.go         |  8 +++
- pkg/kubeapiserver/authorizer/reload.go        | 26 ++++++--
- .../rbac/bootstrappolicy/controller_policy.go |  2 +
- .../rbac/bootstrappolicy/patch_policy.go      | 65 +++++++++++++++++++
- .../authorizer/rbac/bootstrappolicy/policy.go |  6 +-
- .../testdata/controller-roles.yaml            | 12 ++++
- 11 files changed, 175 insertions(+), 10 deletions(-)
+ cmd/kube-apiserver/app/options/options.go     |   6 ++
+ cmd/kube-apiserver/app/server.go              |  33 +++++++++
+ pkg/controlplane/apiserver/config.go          |  15 ++++
+ pkg/kubeapiserver/authorizer/config.go        |   4 ++
+ pkg/kubeapiserver/authorizer/modes/patch.go   |   8 +++
+ pkg/kubeapiserver/authorizer/patch.go         |   8 +++
+ pkg/kubeapiserver/authorizer/reload.go        |  26 +++++--
+ .../rbac/bootstrappolicy/controller_policy.go |   2 +
+ .../rbac/bootstrappolicy/patch_policy.go      |  65 ++++++++++++++++++
+ .../authorizer/rbac/bootstrappolicy/policy.go |   6 +-
+ .../testdata/controller-roles.yaml            |  12 ++++
+ .../go-runner/testdata/tartest/out.tar.gz     | Bin 0 -> 174 bytes
+ 12 files changed, 175 insertions(+), 10 deletions(-)
  create mode 100644 pkg/kubeapiserver/authorizer/modes/patch.go
  create mode 100644 pkg/kubeapiserver/authorizer/patch.go
  create mode 100644 plugin/pkg/auth/authorizer/rbac/bootstrappolicy/patch_policy.go
+ create mode 100644 test/conformance/image/go-runner/testdata/tartest/out.tar.gz
 
 diff --git a/cmd/kube-apiserver/app/options/options.go b/cmd/kube-apiserver/app/options/options.go
 index ebed12af1d6..17c940a734d 100644
@@ -238,17 +238,17 @@ index ebed12af1d6..17c940a734d 100644
 +++ b/cmd/kube-apiserver/app/options/options.go
 @@ -61,6 +61,8 @@ type Extra struct {
  	EndpointReconcilerType string
-
+ 
  	MasterCount int
 +
 +	OpenShiftConfig string
  }
-
+ 
  // NewServerRunOptions creates and returns ServerRunOptions according to the given featureGate and effectiveVersion of the server binary to run.
 @@ -156,5 +158,9 @@ func (s *ServerRunOptions) Flags() (fss cliflag.NamedFlagSets) {
  		"The number of apiservers running in the cluster, must be a positive number. (In use when --endpoint-reconciler-type=master-count is enabled.)")
  	fs.MarkDeprecated("apiserver-count", "apiserver-count is deprecated and will be removed in a future version.")
-
+ 
 +	fs.StringVar(&s.OpenShiftConfig, "openshift-config", s.OpenShiftConfig, "config for openshift")
 +	fs.MarkDeprecated("openshift-config", "to be removed")
 +	fs.MarkHidden("openshift-config")
@@ -262,7 +262,7 @@ index fad0f1e9579..5fcccd80886 100644
 @@ -25,6 +25,10 @@ import (
  	"net/url"
  	"os"
-
+ 
 +	"k8s.io/kubernetes/openshift-kube-apiserver/admission/admissionenablement"
 +	"k8s.io/kubernetes/openshift-kube-apiserver/enablement"
 +	"k8s.io/kubernetes/openshift-kube-apiserver/openshiftkubeapiserver"
@@ -273,7 +273,7 @@ index fad0f1e9579..5fcccd80886 100644
 @@ -96,6 +100,35 @@ cluster's shared state through which all other components interact.`,
  			}
  			cliflag.PrintFlags(fs)
-
+ 
 +			if len(s.OpenShiftConfig) > 0 {
 +				// if we are running openshift, we modify the admission chain defaults accordingly
 +				admissionenablement.InstallOpenShiftAdmissionPlugins(s)
@@ -311,9 +311,9 @@ index c204e5058ef..568d0c138a6 100644
 --- a/pkg/controlplane/apiserver/config.go
 +++ b/pkg/controlplane/apiserver/config.go
 @@ -25,6 +25,10 @@ import (
-
+ 
  	noopoteltrace "go.opentelemetry.io/otel/trace/noop"
-
+ 
 +	"k8s.io/kubernetes/openshift-kube-apiserver/admission/admissionenablement"
 +	"k8s.io/kubernetes/openshift-kube-apiserver/enablement"
 +	"k8s.io/kubernetes/openshift-kube-apiserver/openshiftkubeapiserver"
@@ -324,7 +324,7 @@ index c204e5058ef..568d0c138a6 100644
 @@ -137,6 +141,8 @@ func BuildGenericConfig(
  	// on a fast local network
  	genericConfig.LoopbackClientConfig.DisableCompression = true
-
+ 
 +	enablement.SetLoopbackClientConfig(genericConfig.LoopbackClientConfig)
 +
  	kubeClientConfig := genericConfig.LoopbackClientConfig
@@ -347,13 +347,13 @@ index c204e5058ef..568d0c138a6 100644
  		genericConfig,
  		versionedInformers,
 diff --git a/pkg/kubeapiserver/authorizer/config.go b/pkg/kubeapiserver/authorizer/config.go
-index 5a74fa7c748..f8a1bfa0cfe 100644
+index e654ed317f6..314ee9ff5e3 100644
 --- a/pkg/kubeapiserver/authorizer/config.go
 +++ b/pkg/kubeapiserver/authorizer/config.go
 @@ -34,6 +34,7 @@ import (
  	utilfeature "k8s.io/apiserver/pkg/util/feature"
  	versionedinformers "k8s.io/client-go/informers"
- 	resourcev1alpha2informers "k8s.io/client-go/informers/resource/v1alpha2"
+ 	resourceinformers "k8s.io/client-go/informers/resource/v1alpha3"
 +	"k8s.io/kubernetes/openshift-kube-apiserver/authorization/scopeauthorizer"
  	"k8s.io/kubernetes/pkg/auth/authorizer/abac"
  	"k8s.io/kubernetes/pkg/auth/nodeidentifier"
@@ -367,7 +367,7 @@ index 5a74fa7c748..f8a1bfa0cfe 100644
 +			r.scopeLimitedAuthorizer = scopeauthorizer.NewAuthorizer(config.VersionedInformerFactory.Rbac().V1().ClusterRoles().Lister())
  		}
  	}
-
+ 
 diff --git a/pkg/kubeapiserver/authorizer/modes/patch.go b/pkg/kubeapiserver/authorizer/modes/patch.go
 new file mode 100644
 index 00000000000..bc892601ebe
@@ -403,7 +403,7 @@ index afd3ca76be6..575fba1b486 100644
 @@ -27,6 +27,8 @@ import (
  	"sync/atomic"
  	"time"
-
+ 
 +	"k8s.io/kubernetes/openshift-kube-apiserver/authorization/browsersafe"
 +
  	"k8s.io/apimachinery/pkg/util/sets"
@@ -412,7 +412,7 @@ index afd3ca76be6..575fba1b486 100644
 @@ -58,9 +60,10 @@ type reloadableAuthorizerResolver struct {
  	reloadInterval         time.Duration
  	requireNonWebhookTypes sets.Set[authzconfig.AuthorizerType]
-
+ 
 -	nodeAuthorizer *node.NodeAuthorizer
 -	rbacAuthorizer *rbac.RBACAuthorizer
 -	abacAuthorizer abac.PolicyList
@@ -420,13 +420,13 @@ index afd3ca76be6..575fba1b486 100644
 +	rbacAuthorizer         *rbac.RBACAuthorizer
 +	scopeLimitedAuthorizer authorizer.Authorizer
 +	abacAuthorizer         abac.PolicyList
-
+ 
  	lastLoadedLock   sync.Mutex
  	lastLoadedConfig *authzconfig.AuthorizationConfiguration
 @@ -93,9 +96,11 @@ func (r *reloadableAuthorizerResolver) newForConfig(authzConfig *authzconfig.Aut
  		ruleResolvers []authorizer.RuleResolver
  	)
-
+ 
 -	// Add SystemPrivilegedGroup as an authorizing group
 -	superuserAuthorizer := authorizerfactory.NewPrivilegedGroups(user.SystemPrivilegedGroup)
 -	authorizers = append(authorizers, superuserAuthorizer)
@@ -435,7 +435,7 @@ index afd3ca76be6..575fba1b486 100644
 +		superuserAuthorizer := authorizerfactory.NewPrivilegedGroups(user.SystemPrivilegedGroup)
 +		authorizers = append(authorizers, superuserAuthorizer)
 +	}
-
+ 
  	for _, configuredAuthorizer := range authzConfig.Authorizers {
  		// Keep cases in sync with constant list in k8s.io/kubernetes/pkg/kubeapiserver/authorizer/modes/modes.go.
 @@ -159,8 +164,15 @@ func (r *reloadableAuthorizerResolver) newForConfig(authzConfig *authzconfig.Aut
@@ -456,10 +456,10 @@ index afd3ca76be6..575fba1b486 100644
  			return nil, nil, fmt.Errorf("unknown authorization mode %s specified", configuredAuthorizer.Type)
  		}
 diff --git a/plugin/pkg/auth/authorizer/rbac/bootstrappolicy/controller_policy.go b/plugin/pkg/auth/authorizer/rbac/bootstrappolicy/controller_policy.go
-index b39ac933193..5fd09cf3b96 100644
+index ea28632ccf6..f7c80688ce7 100644
 --- a/plugin/pkg/auth/authorizer/rbac/bootstrappolicy/controller_policy.go
 +++ b/plugin/pkg/auth/authorizer/rbac/bootstrappolicy/controller_policy.go
-@@ -162,6 +162,7 @@ func buildControllerRoles() ([]rbacv1.ClusterRole, []rbacv1.ClusterRoleBinding)
+@@ -160,6 +160,7 @@ func buildControllerRoles() ([]rbacv1.ClusterRole, []rbacv1.ClusterRoleBinding)
  			// resource that is owned by the service and sets blockOwnerDeletion=true in its ownerRef.
  			rbacv1helpers.NewRule("update").Groups(legacyGroup).Resources("services/finalizers").RuleOrDie(),
  			rbacv1helpers.NewRule("get", "list", "create", "update", "delete").Groups(discoveryGroup).Resources("endpointslices").RuleOrDie(),
@@ -467,7 +467,7 @@ index b39ac933193..5fd09cf3b96 100644
  			eventsRule(),
  		},
  	})
-@@ -178,6 +179,7 @@ func buildControllerRoles() ([]rbacv1.ClusterRole, []rbacv1.ClusterRoleBinding)
+@@ -176,6 +177,7 @@ func buildControllerRoles() ([]rbacv1.ClusterRole, []rbacv1.ClusterRoleBinding)
  			// see https://github.com/openshift/kubernetes/blob/8691466059314c3f7d6dcffcbb76d14596ca716c/pkg/controller/endpointslicemirroring/utils.go#L87-L88
  			rbacv1helpers.NewRule("update").Groups(legacyGroup).Resources("endpoints/finalizers").RuleOrDie(),
  			rbacv1helpers.NewRule("get", "list", "create", "update", "delete").Groups(discoveryGroup).Resources("endpointslices").RuleOrDie(),
@@ -547,13 +547,13 @@ index 00000000000..8f91d44c9c8
 +	return bindings
 +}
 diff --git a/plugin/pkg/auth/authorizer/rbac/bootstrappolicy/policy.go b/plugin/pkg/auth/authorizer/rbac/bootstrappolicy/policy.go
-index f91da6e2673..317becfa4a6 100644
+index 4c203379e1f..2d9c4d74b10 100644
 --- a/plugin/pkg/auth/authorizer/rbac/bootstrappolicy/policy.go
 +++ b/plugin/pkg/auth/authorizer/rbac/bootstrappolicy/policy.go
-@@ -190,8 +190,8 @@ func NodeRules() []rbacv1.PolicyRule {
+@@ -192,8 +192,8 @@ func NodeRules() []rbacv1.PolicyRule {
  	return nodePolicyRules
  }
-
+ 
 -// ClusterRoles returns the cluster roles to bootstrap an API server with
 -func ClusterRoles() []rbacv1.ClusterRole {
 +// clusterRoles returns the cluster roles to bootstrap an API server with
@@ -561,9 +561,9 @@ index f91da6e2673..317becfa4a6 100644
  	roles := []rbacv1.ClusterRole{
  		{
  			// a "root" role which can do absolutely anything
-@@ -609,7 +609,7 @@ func ClusterRoles() []rbacv1.ClusterRole {
+@@ -612,7 +612,7 @@ func ClusterRoles() []rbacv1.ClusterRole {
  const systemNodeRoleName = "system:node"
-
+ 
  // ClusterRoleBindings return default rolebindings to the default roles
 -func ClusterRoleBindings() []rbacv1.ClusterRoleBinding {
 +func clusterRoleBindings() []rbacv1.ClusterRoleBinding {
@@ -571,7 +571,7 @@ index f91da6e2673..317becfa4a6 100644
  		rbacv1helpers.NewClusterBinding("cluster-admin").Groups(user.SystemPrivilegedGroup).BindingOrDie(),
  		rbacv1helpers.NewClusterBinding("system:monitoring").Groups(user.MonitoringGroup).BindingOrDie(),
 diff --git a/plugin/pkg/auth/authorizer/rbac/bootstrappolicy/testdata/controller-roles.yaml b/plugin/pkg/auth/authorizer/rbac/bootstrappolicy/testdata/controller-roles.yaml
-index f17fc954f88..2344db6e915 100644
+index 72471fad12e..4188fe4fc2d 100644
 --- a/plugin/pkg/auth/authorizer/rbac/bootstrappolicy/testdata/controller-roles.yaml
 +++ b/plugin/pkg/auth/authorizer/rbac/bootstrappolicy/testdata/controller-roles.yaml
 @@ -517,6 +517,12 @@ items:
@@ -600,6 +600,19 @@ index f17fc954f88..2344db6e915 100644
    - apiGroups:
      - ""
      - events.k8s.io
---
-2.45.2
+diff --git a/test/conformance/image/go-runner/testdata/tartest/out.tar.gz b/test/conformance/image/go-runner/testdata/tartest/out.tar.gz
+new file mode 100644
+index 0000000000000000000000000000000000000000..7cb5eb8413a344ee1e01a64de3bc57e2d44d2067
+GIT binary patch
+literal 174
+zcmV;f08#%RiwFP!00000|LoI23c@fD1<)L&H}Fp;iRX#7La?|<+Ks1|jN(o~AuXlz
+zHUp(JQ-1y>jRTps03bM5CmlVWlS!TnvWD3EV7(;=17ff@9UAW?<}$@>fHKDWEuF8Q
+z-y3rI@}1YOyyr$p{#_rZxb`M$4K;t;_>8~$AGH5Vko>j(yH(~>pYowz1J~+|-}~>F
+cq5WTi1h4&9N~zs>1ONd4{}&!zCjbxt0NQX<bN~PV
+
+literal 0
+HcmV?d00001
+
+-- 
+2.46.0
 

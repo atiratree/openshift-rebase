@@ -1,4 +1,4 @@
-From e00395b91c346a15be4f56193b81304b20204b5c Mon Sep 17 00:00:00 2001
+From 151a99f72bb044de58a39b99fecfb0aa04dba6da Mon Sep 17 00:00:00 2001
 From: Tomas Nozicka <tnozicka@gmail.com>
 Date: Thu, 29 Oct 2020 13:56:29 +0100
 Subject: [PATCH] UPSTREAM: <carry>: Release lock on KCM and KS termination
@@ -11,18 +11,17 @@ OpenShift-Rebase-Source: fc91252212e
 
 UPSTREAM: <carry>: Release lock on KCM and KS termination
 ---
- .../app/controllermanager.go                  | 47 +++++++++++----
+ .../app/controllermanager.go                  | 47 ++++++++++++----
  cmd/kube-controller-manager/app/patch.go      | 14 +++++
- cmd/kube-controller-manager/app/patch_test.go | 58 +++++++++++++++++++
+ cmd/kube-controller-manager/app/patch_test.go | 53 +++++++++++++++++++
  .../app/testing/testserver.go                 |  3 +-
- 4 files changed, 110 insertions(+), 12 deletions(-)
- create mode 100644 cmd/kube-controller-manager/app/patch_test.go
+ 4 files changed, 105 insertions(+), 12 deletions(-)
 
 diff --git a/cmd/kube-controller-manager/app/controllermanager.go b/cmd/kube-controller-manager/app/controllermanager.go
-index 94f4ff8555f..a75678a97e8 100644
+index a50f63df6d5..0356d79d8bc 100644
 --- a/cmd/kube-controller-manager/app/controllermanager.go
 +++ b/cmd/kube-controller-manager/app/controllermanager.go
-@@ -37,6 +37,7 @@ import (
+@@ -38,6 +38,7 @@ import (
  	"k8s.io/apimachinery/pkg/util/sets"
  	"k8s.io/apimachinery/pkg/util/uuid"
  	"k8s.io/apimachinery/pkg/util/wait"
@@ -30,10 +29,10 @@ index 94f4ff8555f..a75678a97e8 100644
  	"k8s.io/apiserver/pkg/server/healthz"
  	"k8s.io/apiserver/pkg/server/mux"
  	utilfeature "k8s.io/apiserver/pkg/util/feature"
-@@ -156,7 +157,9 @@ controller, and serviceaccounts controller.`,
- 
+@@ -164,7 +165,9 @@ controller, and serviceaccounts controller.`,
  			// add feature enablement metrics
- 			utilfeature.DefaultMutableFeatureGate.AddMetrics()
+ 			fg := s.ComponentGlobalsRegistry.FeatureGateFor(utilversion.DefaultKubeComponent)
+ 			fg.(featuregate.MutableFeatureGate).AddMetrics()
 -			return Run(context.Background(), c.Complete())
 +
 +			stopCh := server.SetupSignalHandler()
@@ -41,7 +40,7 @@ index 94f4ff8555f..a75678a97e8 100644
  		},
  		Args: func(cmd *cobra.Command, args []string) error {
  			for _, arg := range args {
-@@ -193,9 +196,9 @@ func ResyncPeriod(c *config.CompletedConfig) func() time.Duration {
+@@ -201,9 +204,9 @@ func ResyncPeriod(c *config.CompletedConfig) func() time.Duration {
  }
  
  // Run runs the KubeControllerManagerOptions.
@@ -53,7 +52,7 @@ index 94f4ff8555f..a75678a97e8 100644
  
  	// To help debugging, immediately log version
  	logger.Info("Starting", "version", version.Get())
-@@ -324,10 +327,18 @@ func Run(ctx context.Context, c *config.CompletedConfig) error {
+@@ -360,10 +363,18 @@ func Run(ctx context.Context, c *config.CompletedConfig) error {
  				run(ctx, controllerDescriptors)
  			},
  			OnStoppedLeading: func() {
@@ -75,7 +74,7 @@ index 94f4ff8555f..a75678a97e8 100644
  
  	// If Leader Migration is enabled, proceed to attempt the migration lock.
  	if leaderMigrator != nil {
-@@ -351,10 +362,18 @@ func Run(ctx context.Context, c *config.CompletedConfig) error {
+@@ -387,10 +398,18 @@ func Run(ctx context.Context, c *config.CompletedConfig) error {
  					run(ctx, controllerDescriptors)
  				},
  				OnStoppedLeading: func() {
@@ -97,7 +96,7 @@ index 94f4ff8555f..a75678a97e8 100644
  	}
  
  	<-stopCh
-@@ -886,7 +905,7 @@ func createClientBuilders(logger klog.Logger, c *config.CompletedConfig) (client
+@@ -922,7 +941,7 @@ func createClientBuilders(logger klog.Logger, c *config.CompletedConfig) (client
  
  // leaderElectAndRun runs the leader election, and runs the callbacks once the leader lease is acquired.
  // TODO: extract this function into staging/controller-manager
@@ -106,7 +105,7 @@ index 94f4ff8555f..a75678a97e8 100644
  	logger := klog.FromContext(ctx)
  	rl, err := resourcelock.NewFromKubeconfig(resourceLock,
  		c.ComponentConfig.Generic.LeaderElection.ResourceNamespace,
-@@ -902,7 +921,13 @@ func leaderElectAndRun(ctx context.Context, c *config.CompletedConfig, lockIdent
+@@ -938,7 +957,13 @@ func leaderElectAndRun(ctx context.Context, c *config.CompletedConfig, lockIdent
  		klog.FlushAndExit(klog.ExitFlushTimeout, 1)
  	}
  
@@ -122,12 +121,12 @@ index 94f4ff8555f..a75678a97e8 100644
  		LeaseDuration: c.ComponentConfig.Generic.LeaderElection.LeaseDuration.Duration,
  		RenewDeadline: c.ComponentConfig.Generic.LeaderElection.RenewDeadline.Duration,
 diff --git a/cmd/kube-controller-manager/app/patch.go b/cmd/kube-controller-manager/app/patch.go
-index 9286fa77cc3..1d8ae2eeb56 100644
+index e1ec6ee5f52..9e4915b6d61 100644
 --- a/cmd/kube-controller-manager/app/patch.go
 +++ b/cmd/kube-controller-manager/app/patch.go
-@@ -133,3 +133,17 @@ func createRestConfigForHealthMonitor(restConfig *rest.Config) *rest.Config {
- 
- 	return &restConfigCopy
+@@ -164,3 +164,17 @@ func (rt *rejectIfNotReadyHeaderRT) RoundTrip(r *http.Request) (*http.Response,
+ 	}
+ 	return rt.baseRT.RoundTrip(r)
  }
 +
 +// mergeCh takes two stop channels and return a single one that
@@ -144,16 +143,13 @@ index 9286fa77cc3..1d8ae2eeb56 100644
 +	return merged
 +}
 diff --git a/cmd/kube-controller-manager/app/patch_test.go b/cmd/kube-controller-manager/app/patch_test.go
-new file mode 100644
-index 00000000000..1730c38f002
---- /dev/null
+index 7ab5a7662ec..fad35b4620e 100644
+--- a/cmd/kube-controller-manager/app/patch_test.go
 +++ b/cmd/kube-controller-manager/app/patch_test.go
-@@ -0,0 +1,58 @@
-+package app
-+
-+import (
-+	"testing"
-+)
+@@ -72,3 +72,56 @@ type fakeRTFunc func(r *http.Request) (*http.Response, error)
+ func (rt fakeRTFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+ 	return rt(r)
+ }
 +
 +func TestMergeCh(t *testing.T) {
 +	testCases := []struct {
@@ -222,5 +218,5 @@ index c29ada8f566..9d2cd929f21 100644
  		}
  	}(ctx)
 -- 
-2.45.2
+2.46.0
 

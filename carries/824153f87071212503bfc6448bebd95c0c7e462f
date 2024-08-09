@@ -1,4 +1,4 @@
-From ef86c5b03692fcd11149159abe1943a69bb55bd1 Mon Sep 17 00:00:00 2001
+From 91160a40e8e165a22aaf759a8915f9d7cb7c8387 Mon Sep 17 00:00:00 2001
 From: David Eads <deads@redhat.com>
 Date: Thu, 29 Oct 2020 13:55:56 +0100
 Subject: [PATCH] UPSTREAM: <carry>: kube-controller-manager: allow running
@@ -34,7 +34,7 @@ blocks deletion indifinetelly as GC will ignore these resources.
  cmd/kube-controller-manager/app/apps.go       |   5 +-
  .../app/config/config.go                      |   2 +
  .../app/config/patch.go                       |   9 +
- .../app/controllermanager.go                  |  20 +-
+ .../app/controllermanager.go                  |  19 +-
  .../app/options/options.go                    |   6 +
  cmd/kube-controller-manager/app/patch.go      |  84 +++++
  cmd/kube-controller-manager/app/patch_gc.go   |  37 +++
@@ -43,7 +43,7 @@ blocks deletion indifinetelly as GC will ignore these resources.
  pkg/controller/daemon/daemon_controller.go    |  24 +-
  pkg/controller/daemon/patch_nodeselector.go   | 109 +++++++
  .../daemon/patch_nodeselector_test.go         | 186 +++++++++++
- 12 files changed, 851 insertions(+), 11 deletions(-)
+ 12 files changed, 850 insertions(+), 11 deletions(-)
  create mode 100644 cmd/kube-controller-manager/app/config/patch.go
  create mode 100644 cmd/kube-controller-manager/app/patch.go
  create mode 100644 cmd/kube-controller-manager/app/patch_gc.go
@@ -98,23 +98,22 @@ index 00000000000..a7112d003d4
 +	KubeDefaultProjectNodeSelector      string
 +}
 diff --git a/cmd/kube-controller-manager/app/controllermanager.go b/cmd/kube-controller-manager/app/controllermanager.go
-index 179231488b3..8f1c69afcf3 100644
+index 39bdcdc805d..f10fa78e730 100644
 --- a/cmd/kube-controller-manager/app/controllermanager.go
 +++ b/cmd/kube-controller-manager/app/controllermanager.go
-@@ -141,6 +141,12 @@ controller, and serviceaccounts controller.`,
- 			if err != nil {
+@@ -149,6 +149,11 @@ controller, and serviceaccounts controller.`,
  				return err
  			}
-+
+ 
 +			if err := ShimForOpenShift(s, c); err != nil {
 +				fmt.Fprintf(os.Stderr, "%v\n", err)
 +				return err
 +			}
 +
  			// add feature enablement metrics
- 			utilfeature.DefaultMutableFeatureGate.AddMetrics()
- 			return Run(context.Background(), c.Complete())
-@@ -339,6 +345,8 @@ func Run(ctx context.Context, c *config.CompletedConfig) error {
+ 			fg := s.ComponentGlobalsRegistry.FeatureGateFor(utilversion.DefaultKubeComponent)
+ 			fg.(featuregate.MutableFeatureGate).AddMetrics()
+@@ -376,6 +381,8 @@ func Run(ctx context.Context, c *config.CompletedConfig) error {
  
  // ControllerContext defines the context object for controller
  type ControllerContext struct {
@@ -123,7 +122,7 @@ index 179231488b3..8f1c69afcf3 100644
  	// ClientBuilder will provide a client for this controller to use
  	ClientBuilder clientbuilder.ControllerClientBuilder
  
-@@ -588,7 +596,12 @@ func CreateControllerContext(ctx context.Context, s *config.CompletedConfig, roo
+@@ -625,7 +632,12 @@ func CreateControllerContext(ctx context.Context, s *config.CompletedConfig, roo
  	}
  
  	versionedClient := rootClientBuilder.ClientOrDie("shared-informers")
@@ -137,7 +136,7 @@ index 179231488b3..8f1c69afcf3 100644
  
  	metadataClient := metadata.NewForConfigOrDie(rootClientBuilder.ConfigOrDie("metadata-informers"))
  	metadataInformers := metadatainformer.NewSharedInformerFactoryWithOptions(metadataClient, ResyncPeriod(s)(), metadatainformer.WithTransform(trim))
-@@ -614,6 +627,7 @@ func CreateControllerContext(ctx context.Context, s *config.CompletedConfig, roo
+@@ -651,6 +663,7 @@ func CreateControllerContext(ctx context.Context, s *config.CompletedConfig, roo
  	}
  
  	controllerContext := ControllerContext{
@@ -145,7 +144,7 @@ index 179231488b3..8f1c69afcf3 100644
  		ClientBuilder:                   clientBuilder,
  		InformerFactory:                 sharedInformers,
  		ObjectOrMetadataInformerFactory: informerfactory.NewInformerFactory(sharedInformers, metadataInformers),
-@@ -803,10 +817,10 @@ func startServiceAccountTokenController(ctx context.Context, controllerContext C
+@@ -840,10 +853,10 @@ func startServiceAccountTokenController(ctx context.Context, controllerContext C
  		controllerContext.InformerFactory.Core().V1().ServiceAccounts(),
  		controllerContext.InformerFactory.Core().V1().Secrets(),
  		rootClientBuilder.ClientOrDie("tokens-controller"),
@@ -159,27 +158,27 @@ index 179231488b3..8f1c69afcf3 100644
  	if err != nil {
  		return nil, true, fmt.Errorf("error creating Tokens controller: %v", err)
 diff --git a/cmd/kube-controller-manager/app/options/options.go b/cmd/kube-controller-manager/app/options/options.go
-index 6d56ee1e5bc..44d261fe0f2 100644
+index ffc24bdb23e..a90d891751f 100644
 --- a/cmd/kube-controller-manager/app/options/options.go
 +++ b/cmd/kube-controller-manager/app/options/options.go
-@@ -100,6 +100,7 @@ type KubeControllerManagerOptions struct {
+@@ -102,6 +102,7 @@ type KubeControllerManagerOptions struct {
  
- 	Master                      string
- 	ShowHiddenMetricsForVersion string
-+	OpenShiftContext            kubecontrollerconfig.OpenShiftContext
+ 	// ComponentGlobalsRegistry is the registry where the effective versions and feature gates for all components are stored.
+ 	ComponentGlobalsRegistry utilversion.ComponentGlobalsRegistry
++	OpenShiftContext         kubecontrollerconfig.OpenShiftContext
  }
  
  // NewKubeControllerManagerOptions creates a new KubeControllerManagerOptions with a default config.
 @@ -286,6 +287,8 @@ func (s *KubeControllerManagerOptions) Flags(allControllers []string, disabledBy
- 		}
- 	}
- 
+ 	fs.StringVar(&s.Master, "master", s.Master, "The address of the Kubernetes API server (overrides any value in kubeconfig).")
+ 	fs.StringVar(&s.Generic.ClientConnection.Kubeconfig, "kubeconfig", s.Generic.ClientConnection.Kubeconfig, "Path to kubeconfig file with authorization and master location information (the master location can be overridden by the master flag).")
+ 	s.ComponentGlobalsRegistry.AddFlags(fss.FlagSet("generic"))
 +	fs.StringVar(&s.OpenShiftContext.OpenShiftConfig, "openshift-config", s.OpenShiftContext.OpenShiftConfig, "indicates that this process should be compatible with openshift start master")
 +	fs.MarkHidden("openshift-config")
- 	utilfeature.DefaultMutableFeatureGate.AddFlag(fss.FlagSet("generic"))
  
  	return fss
-@@ -391,6 +394,9 @@ func (s *KubeControllerManagerOptions) ApplyTo(c *kubecontrollerconfig.Config, a
+ }
+@@ -393,6 +396,9 @@ func (s *KubeControllerManagerOptions) ApplyTo(c *kubecontrollerconfig.Config, a
  			return err
  		}
  	}
@@ -1092,5 +1091,5 @@ index 00000000000..6553fe694ea
 +	}
 +}
 -- 
-2.45.2
+2.46.0
 

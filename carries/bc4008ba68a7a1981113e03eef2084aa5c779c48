@@ -1,4 +1,4 @@
-From 46d5216ff250942825542a25e9e49c9d0adaad1e Mon Sep 17 00:00:00 2001
+From 84274f94990b619b094c1efcb852deb8926cb370 Mon Sep 17 00:00:00 2001
 From: David Eads <deads@redhat.com>
 Date: Thu, 29 Oct 2020 13:55:55 +0100
 Subject: [PATCH] UPSTREAM: 93286: wait for apiservices on startup
@@ -9,16 +9,17 @@ OpenShift-Rebase-Source: 5a2488cd16c
  1 file changed, 40 insertions(+), 2 deletions(-)
 
 diff --git a/staging/src/k8s.io/kube-aggregator/pkg/apiserver/apiserver.go b/staging/src/k8s.io/kube-aggregator/pkg/apiserver/apiserver.go
-index 525597c3ad0..6b3b379191c 100644
+index aaf749ca650..164875e5caa 100644
 --- a/staging/src/k8s.io/kube-aggregator/pkg/apiserver/apiserver.go
 +++ b/staging/src/k8s.io/kube-aggregator/pkg/apiserver/apiserver.go
-@@ -20,11 +20,14 @@ import (
+@@ -20,12 +20,15 @@ import (
  	"context"
  	"fmt"
  	"net/http"
 +	"strings"
+ 	"sync"
  	"time"
-
+ 
  	apierrors "k8s.io/apimachinery/pkg/api/errors"
  	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 +	"k8s.io/apimachinery/pkg/labels"
@@ -27,16 +28,16 @@ index 525597c3ad0..6b3b379191c 100644
  	"k8s.io/apimachinery/pkg/util/sets"
  	"k8s.io/apimachinery/pkg/util/wait"
  	"k8s.io/apiserver/pkg/endpoints/discovery/aggregated"
-@@ -38,6 +41,7 @@ import (
- 	"k8s.io/client-go/kubernetes"
+@@ -40,6 +43,7 @@ import (
  	"k8s.io/client-go/transport"
+ 	"k8s.io/component-base/metrics/legacyregistry"
  	"k8s.io/component-base/tracing"
 +	"k8s.io/klog/v2"
  	v1 "k8s.io/kube-aggregator/pkg/apis/apiregistration/v1"
  	v1helper "k8s.io/kube-aggregator/pkg/apis/apiregistration/v1/helper"
  	"k8s.io/kube-aggregator/pkg/apis/apiregistration/v1beta1"
-@@ -352,6 +356,33 @@ func (c completedConfig) NewWithDelegate(delegationTarget genericapiserver.Deleg
-
+@@ -374,6 +378,33 @@ func (c completedConfig) NewWithDelegate(delegationTarget genericapiserver.Deleg
+ 
  		return nil
  	})
 +	s.GenericAPIServer.AddPostStartHook("apiservice-wait-for-first-sync", func(context genericapiserver.PostStartHookContext) error {
@@ -66,10 +67,10 @@ index 525597c3ad0..6b3b379191c 100644
 +		}, context.StopCh)
 +		return err
 +	})
-
+ 
  	if utilfeature.DefaultFeatureGate.Enabled(genericfeatures.AggregatedDiscoveryEndpoint) {
  		s.discoveryAggregationController = NewDiscoveryManager(
-@@ -537,7 +568,11 @@ func (s *APIAggregator) AddAPIService(apiService *v1.APIService) error {
+@@ -559,7 +590,11 @@ func (s *APIAggregator) AddAPIService(apiService *v1.APIService) error {
  	}
  	proxyHandler.updateAPIService(apiService)
  	if s.openAPIAggregationController != nil {
@@ -82,10 +83,10 @@ index 525597c3ad0..6b3b379191c 100644
  	}
  	if s.openAPIV3AggregationController != nil {
  		s.openAPIV3AggregationController.AddAPIService(proxyHandler, apiService)
-@@ -546,7 +581,10 @@ func (s *APIAggregator) AddAPIService(apiService *v1.APIService) error {
+@@ -568,7 +603,10 @@ func (s *APIAggregator) AddAPIService(apiService *v1.APIService) error {
  		s.discoveryAggregationController.AddAPIService(apiService, proxyHandler)
  	}
-
+ 
 -	s.proxyHandlers[apiService.Name] = proxyHandler
 +	// we want to update the registration bit last after all the pieces are wired together
 +	defer func() {
@@ -93,7 +94,7 @@ index 525597c3ad0..6b3b379191c 100644
 +	}()
  	s.GenericAPIServer.Handler.NonGoRestfulMux.Handle(proxyPath, proxyHandler)
  	s.GenericAPIServer.Handler.NonGoRestfulMux.UnlistedHandlePrefix(proxyPath+"/", proxyHandler)
-
---
-2.45.2
+ 
+-- 
+2.46.0
 
