@@ -2,7 +2,7 @@ package carry
 
 import (
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -55,7 +55,9 @@ func (c *Log) GetCommits(repository git.Git) ([]*gitv5object.Commit, error) {
 	if err != nil {
 		return nil, err
 	}
-	sort.Sort(git.CommitsByDate(commits))
+	// LogFromTag uses gitv5.LogOrderCommitterTime order, but we need the oldest first
+	slices.Reverse(commits)
+
 	foundRebaseMarker := false
 	var carryCommits []*gitv5object.Commit
 	for _, c := range commits {
