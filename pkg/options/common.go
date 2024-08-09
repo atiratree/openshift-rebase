@@ -25,8 +25,8 @@ func NewCommon(streams IOStreams) Common {
 }
 
 func (o *Common) AddFlags(flags *pflag.FlagSet) {
-	flags.StringVar(&o.RepositoryDir, "repository", o.RepositoryDir, "Kubernetes repository directory, or current if none specified")
-	flags.StringVar(&o.From, "from", o.From, "Kubernetes starting version tag")
+	flags.StringVar(&o.RepositoryDir, "repository", o.RepositoryDir, "Kubernetes repository directory, or current directory if none specified")
+	flags.StringVar(&o.From, "from", o.From, "Kubernetes version tag from which to start looking for carries (usually the k8s version of the last rebase)")
 }
 
 func (o *Common) Complete() error {
